@@ -78,7 +78,7 @@ function displayWelcomeMessage(userName) {
                 <div class="welcome-content">
                     <i class="bi bi-hand-thumbs-up"></i>
                     <div class="welcome-text">
-                        <h3>Hello Zaid!</h3>
+                        <h3>Hello Moawya!</h3>
                         <p>Welcome to SteganoTool. You're using the demo account. Enjoy exploring our steganography features!</p>
                     </div>
                     <button class="welcome-close"><i class="bi bi-x"></i></button>

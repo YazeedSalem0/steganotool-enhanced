@@ -38,6 +38,8 @@ Before deploying the application, ensure you have the following:
    pip install -r requirements.txt
    ```
 
+   python api.py
+
 ### Configuration
 
 1. Check the default configuration in `api.py`:

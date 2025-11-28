@@ -174,10 +174,14 @@ def hide_data_in_image(input_path, output_path, data):
             output_path = os.path.splitext(output_path)[0] + ".png"
         
         # Convert binary data to a string of bits
-        binary_data = ''.join(format(byte, '08b') for byte in data)
-        # Add terminator
-        binary_data += '00000000'  # Null byte as terminator
+        # Prepend 4-byte length prefix (big-endian) to know exactly how much data to extract
+        data_length = len(data)
+        length_prefix = data_length.to_bytes(4, byteorder='big')
+        data_with_length = length_prefix + data
         
+        binary_data = ''.join(format(byte, '08b') for byte in data_with_length)
+        
+        print(f"DEBUG: Data length: {data_length} bytes, with prefix: {len(data_with_length)} bytes")
         print(f"DEBUG: Data length in bits: {len(binary_data)}")
         print(f"DEBUG: First 32 bits of data: {binary_data[:32]}")
         
@@ -259,38 +263,38 @@ def extract_data_from_image(image_path):
     
     # Extract the LSB from each byte
     extracted_bits = ""
-    found_terminator = False
-    terminator_position = -1
     
-    # Print the first 100 bits to see pattern
-    debug_bits = []
+    # First, extract 4 bytes (32 bits) to get the length prefix
+    length_bits_needed = 32
+    for i in range(length_bits_needed):
+        if i < len(flattened):
+            bit = str(flattened[i] & 1)
+            extracted_bits += bit
     
-    # Scan the entire image, not just the first 1000 pixels
-    for i in range(len(flattened)):
+    # Convert length prefix to integer
+    length_bytes = []
+    for i in range(0, 32, 8):
+        byte = extracted_bits[i:i+8]
+        length_bytes.append(int(byte, 2))
+    data_length = int.from_bytes(bytes(length_bytes), byteorder='big')
+    
+    print(f"DEBUG: Length prefix indicates {data_length} bytes of data")
+    
+    # Validate length is reasonable
+    if data_length <= 0 or data_length > 10000000:  # Max 10MB
+        print(f"DEBUG: Invalid data length {data_length}, trying fallback extraction")
+        # Fallback: extract until we find password marker
+        return extract_data_from_image_fallback(image_path)
+    
+    # Extract exactly data_length bytes (plus the 4-byte length prefix we already extracted)
+    total_bits_needed = (4 + data_length) * 8  # 4 bytes length + data_length bytes
+    
+    # Continue extracting bits
+    for i in range(length_bits_needed, min(total_bits_needed, len(flattened))):
         bit = str(flattened[i] & 1)
         extracted_bits += bit
-        
-        # Save first 100 bits for debug output
-        if i < 100:
-            debug_bits.append(bit)
-        
-        # Check for terminator every 8 bits
-        if len(extracted_bits) % 8 == 0 and len(extracted_bits) >= 8:
-            byte_index = len(extracted_bits) - 8
-            byte = extracted_bits[byte_index:byte_index+8]
-            if byte == '00000000':
-                found_terminator = True
-                terminator_position = i
-                extracted_bits = extracted_bits[:byte_index]
-                print(f"DEBUG: Found terminator at position {terminator_position}")
-                break
     
-    print(f"DEBUG: First 100 extracted bits: {''.join(debug_bits)}")
-    print(f"DEBUG: Terminator found: {found_terminator}")
-    print(f"DEBUG: Total bits extracted: {len(extracted_bits)}")
-    
-    if len(extracted_bits) % 8 != 0:
-        print(f"DEBUG: Warning - extracted bits not multiple of 8: {len(extracted_bits)}")
+    print(f"DEBUG: Extracted {len(extracted_bits)} bits ({len(extracted_bits) // 8} bytes)")
     
     # Group the bits into bytes
     extracted_bytes = []
@@ -300,16 +304,99 @@ def extract_data_from_image(image_path):
             extracted_bytes.append(int(byte, 2))
     
     result = bytes(extracted_bytes)
-    print(f"DEBUG: Extracted {len(result)} bytes of data")
+    
+    # Remove the 4-byte length prefix to get the actual data
+    if len(result) >= 4:
+        result = result[4:]  # Skip the length prefix
+        print(f"DEBUG: Extracted {len(result)} bytes of actual data (after removing length prefix)")
+    else:
+        print(f"DEBUG: Warning - extracted data too short: {len(result)} bytes")
+        return extract_data_from_image_fallback(image_path)
     
     # Print first few bytes as hex for debugging
     if len(result) > 0:
         hex_data = ' '.join([f"{b:02x}" for b in result[:16]])
         print(f"DEBUG: First 16 bytes (hex): {hex_data}")
+        if len(result) > 32:
+            hex_data_end = ' '.join([f"{b:02x}" for b in result[-32:]])
+            print(f"DEBUG: Last 32 bytes (hex): {hex_data_end}")
     else:
         print("DEBUG: No data extracted")
     
     return result
+
+def extract_data_from_image_fallback(image_path):
+    """Fallback extraction method for old format (with null byte terminator)"""
+    # Open the image
+    img = Image.open(image_path)
+    
+    # Convert image to RGB if it's not already
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    # Convert image to numpy array
+    img_array = np.array(img)
+    flattened = img_array.reshape(-1)
+    
+    # Extract bits and look for password marker pattern
+    extracted_bits = ""
+    max_bits = min(len(flattened), 1000000)  # Limit extraction
+    
+    for i in range(max_bits):
+        bit = str(flattened[i] & 1)
+        extracted_bits += bit
+        
+        # Every 8 bits, check if we have enough data and look for password marker
+        if len(extracted_bits) % 8 == 0 and len(extracted_bits) >= 200:  # At least 25 bytes
+            # Convert to bytes
+            current_bytes = []
+            for j in range(0, len(extracted_bits), 8):
+                if j + 8 <= len(extracted_bits):
+                    current_bytes.append(int(extracted_bits[j:j+8], 2))
+            current_data = bytes(current_bytes)
+            
+            # Search backwards for password marker
+            for k in range(len(current_data) - 1, max(0, len(current_data) - 300), -1):
+                if current_data[k] == 0x01:
+                    password_candidate = current_data[k+1:]
+                    if len(password_candidate) >= 4:
+                        try:
+                            password_str = password_candidate.decode('utf-8')
+                            if (4 <= len(password_str) <= 128 and 
+                                all(32 <= ord(c) <= 126 for c in password_str)):
+                                # Found it! Extract up to this point
+                                extracted_bits = extracted_bits[:k * 8]
+                                print(f"DEBUG: Fallback - Found password marker at byte {k}")
+                                
+                                # Convert to bytes
+                                result_bytes = []
+                                for j in range(0, len(extracted_bits), 8):
+                                    if j + 8 <= len(extracted_bits):
+                                        result_bytes.append(int(extracted_bits[j:j+8], 2))
+                                return bytes(result_bytes)
+                        except (UnicodeDecodeError, ValueError):
+                            continue
+    
+    # If we didn't find password marker, extract until null byte (old method)
+    extracted_bits = ""
+    for i in range(min(len(flattened), 100000)):
+        bit = str(flattened[i] & 1)
+        extracted_bits += bit
+        
+        if len(extracted_bits) % 8 == 0 and len(extracted_bits) >= 8:
+            byte_index = len(extracted_bits) - 8
+            byte = extracted_bits[byte_index:byte_index+8]
+            if byte == '00000000' and len(extracted_bits) >= 200:  # Only stop if we have reasonable data
+                extracted_bits = extracted_bits[:byte_index]
+                break
+    
+    # Convert to bytes
+    result_bytes = []
+    for i in range(0, len(extracted_bits), 8):
+        if i + 8 <= len(extracted_bits):
+            result_bytes.append(int(extracted_bits[i:i+8], 2))
+    
+    return bytes(result_bytes)
 
 # Audio steganography functions
 def hide_data_in_audio(audio_path, output_path, data):
@@ -344,10 +431,14 @@ def hide_data_in_audio(audio_path, output_path, data):
         print(f"DEBUG: Total audio size: {len(frames)} bytes")
         
         # Convert binary data to a string of bits
-        binary_data = ''.join(format(byte, '08b') for byte in data)
-        # Add terminator
-        binary_data += '00000000'  # Null byte as terminator
+        # Prepend 4-byte length prefix (big-endian) to know exactly how much data to extract
+        data_length = len(data)
+        length_prefix = data_length.to_bytes(4, byteorder='big')
+        data_with_length = length_prefix + data
         
+        binary_data = ''.join(format(byte, '08b') for byte in data_with_length)
+        
+        print(f"DEBUG: Data length: {data_length} bytes, with prefix: {len(data_with_length)} bytes")
         print(f"DEBUG: Data length in bits: {len(binary_data)}")
         print(f"DEBUG: First 32 bits of data: {binary_data[:32] if len(binary_data) >= 32 else binary_data}")
         
@@ -408,44 +499,59 @@ def extract_data_from_audio(audio_path):
         
         # Extract the LSB from each byte
         extracted_bits = ""
-        for i in range(len(frames)):
-            # Get LSB from each byte
-            extracted_bits += str(frames[i] & 1)
-            
-            # Check for terminator every 8 bits
-            if len(extracted_bits) % 8 == 0 and len(extracted_bits) >= 8:
-                byte_index = len(extracted_bits) - 8
-                byte = extracted_bits[byte_index:byte_index+8]
-                if byte == '00000000':
-                    # Found terminator, truncate the bits
-                    extracted_bits = extracted_bits[:byte_index]
-                    print(f"DEBUG: Found terminator at position {i}")
-                    break
         
-        # Print debug info
-        print(f"DEBUG: Total bits extracted: {len(extracted_bits)}")
-        if len(extracted_bits) > 0:
-            print(f"DEBUG: First 32 bits extracted: {extracted_bits[:32] if len(extracted_bits) >= 32 else extracted_bits}")
+        # First, extract 4 bytes (32 bits) to get the length prefix
+        length_bits_needed = 32
+        for i in range(min(length_bits_needed, len(frames))):
+            bit = str(frames[i] & 1)
+            extracted_bits += bit
         
-        # Check if we have valid data
-        if len(extracted_bits) == 0 or len(extracted_bits) % 8 != 0:
-            print(f"DEBUG: Warning - extracted bits not multiple of 8: {len(extracted_bits)}")
-            
-            # Try to pad if almost a multiple of 8
-            remainder = len(extracted_bits) % 8
-            if remainder > 0:
-                padding = '0' * (8 - remainder)
-                extracted_bits += padding
-                print(f"DEBUG: Padded with {8 - remainder} zeros")
-        
-        # Group the bits into bytes
-        extracted_bytes = []
-        for i in range(0, len(extracted_bits), 8):
-            if i + 8 <= len(extracted_bits):
+        # Convert length prefix to integer
+        if len(extracted_bits) >= 32:
+            length_bytes = []
+            for i in range(0, 32, 8):
                 byte = extracted_bits[i:i+8]
-                extracted_bytes.append(int(byte, 2))
+                length_bytes.append(int(byte, 2))
+            data_length = int.from_bytes(bytes(length_bytes), byteorder='big')
+            
+            print(f"DEBUG: Length prefix indicates {data_length} bytes of data")
+            
+            # Validate length is reasonable
+            if data_length > 0 and data_length <= 10000000:  # Max 10MB
+                # Extract exactly data_length bytes (plus the 4-byte length prefix)
+                total_bits_needed = (4 + data_length) * 8
+                
+                # Continue extracting bits
+                for i in range(length_bits_needed, min(total_bits_needed, len(frames))):
+                    bit = str(frames[i] & 1)
+                    extracted_bits += bit
+                
+                print(f"DEBUG: Extracted {len(extracted_bits)} bits ({len(extracted_bits) // 8} bytes)")
+                
+                # Group the bits into bytes
+                extracted_bytes = []
+                for i in range(0, len(extracted_bits), 8):
+                    if i + 8 <= len(extracted_bits):
+                        byte = extracted_bits[i:i+8]
+                        extracted_bytes.append(int(byte, 2))
+                
+                result = bytes(extracted_bytes)
+                
+                # Remove the 4-byte length prefix
+                if len(result) >= 4:
+                    result = result[4:]
+                    print(f"DEBUG: Extracted {len(result)} bytes of actual data (after removing length prefix)")
+                else:
+                    result = b''
+            else:
+                # Invalid length, use fallback
+                print(f"DEBUG: Invalid length {data_length}, using fallback extraction")
+                result = extract_data_from_audio_fallback(audio_path)
+        else:
+            # Not enough bits for length prefix, use fallback
+            print(f"DEBUG: Not enough data for length prefix, using fallback extraction")
+            result = extract_data_from_audio_fallback(audio_path)
         
-        result = bytes(extracted_bytes)
         print(f"DEBUG: Extracted {len(result)} bytes of data")
         
         # Print first few bytes as hex for debugging
@@ -459,6 +565,66 @@ def extract_data_from_audio(audio_path):
     except Exception as e:
         print(f"Error in extract_data_from_audio: {str(e)}")
         raise
+
+def extract_data_from_audio_fallback(audio_path):
+    """Fallback extraction method for old format (with null byte terminator)"""
+    try:
+        with wave.open(audio_path, 'rb') as audio_file:
+            n_frames = audio_file.getnframes()
+            frames = audio_file.readframes(n_frames)
+        
+        extracted_bits = ""
+        max_bits = min(len(frames), 1000000)
+        
+        # Extract and look for password marker
+        for i in range(max_bits):
+            extracted_bits += str(frames[i] & 1)
+            
+            if len(extracted_bits) % 8 == 0 and len(extracted_bits) >= 200:
+                current_bytes = []
+                for j in range(0, len(extracted_bits), 8):
+                    if j + 8 <= len(extracted_bits):
+                        current_bytes.append(int(extracted_bits[j:j+8], 2))
+                current_data = bytes(current_bytes)
+                
+                # Search backwards for password marker
+                for k in range(len(current_data) - 1, max(0, len(current_data) - 300), -1):
+                    if current_data[k] == 0x01:
+                        password_candidate = current_data[k+1:]
+                        if len(password_candidate) >= 4:
+                            try:
+                                password_str = password_candidate.decode('utf-8')
+                                if (4 <= len(password_str) <= 128 and 
+                                    all(32 <= ord(c) <= 126 for c in password_str)):
+                                    extracted_bits = extracted_bits[:k * 8]
+                                    result_bytes = []
+                                    for j in range(0, len(extracted_bits), 8):
+                                        if j + 8 <= len(extracted_bits):
+                                            result_bytes.append(int(extracted_bits[j:j+8], 2))
+                                    return bytes(result_bytes)
+                            except (UnicodeDecodeError, ValueError):
+                                continue
+        
+        # Fallback to null byte terminator
+        extracted_bits = ""
+        for i in range(min(len(frames), 100000)):
+            extracted_bits += str(frames[i] & 1)
+            if len(extracted_bits) % 8 == 0 and len(extracted_bits) >= 8:
+                byte_index = len(extracted_bits) - 8
+                byte = extracted_bits[byte_index:byte_index+8]
+                if byte == '00000000' and len(extracted_bits) >= 200:
+                    extracted_bits = extracted_bits[:byte_index]
+                    break
+        
+        result_bytes = []
+        for i in range(0, len(extracted_bits), 8):
+            if i + 8 <= len(extracted_bits):
+                result_bytes.append(int(extracted_bits[i:i+8], 2))
+        
+        return bytes(result_bytes)
+    except Exception as e:
+        print(f"Error in extract_data_from_audio_fallback: {str(e)}")
+        return b''
 
 # Video steganography functions
 def hide_data_in_video(video_path, data, output_path):
