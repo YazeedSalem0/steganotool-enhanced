@@ -34,6 +34,9 @@
                         <a class="nav-link" href="#features">Features</a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" href="#url-scanner">URL Scanner</a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="#api">API</a>
                     </li>
                     <li class="nav-item">
@@ -246,6 +249,37 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- URL Scanner Section -->
+    <section class="main-content" id="url-scanner">
+        <div class="container">
+            <div class="section-header text-center">
+                <h2><i class="bi bi-shield-check"></i> VirusTotal URL Scanner</h2>
+                <p>Scan URLs for malware and security threats using VirusTotal's comprehensive database</p>
+            </div>
+            
+            <div class="tool-container">
+                <form id="urlScanForm" class="modern-form">
+                    <div class="form-group">
+                        <label for="urlToScan" class="form-label">
+                            <i class="bi bi-link-45deg"></i> URL to Scan
+                        </label>
+                        <input type="url" class="form-control" id="urlToScan" name="url" 
+                               placeholder="https://example.com" required>
+                        <small class="form-text">Enter a complete URL starting with http:// or https://</small>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <i class="bi bi-search"></i> Scan URL
+                        </button>
+                    </div>
+                </form>
+                
+                <div id="urlScanResult" class="result-area"></div>
             </div>
         </div>
     </section>

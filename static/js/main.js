@@ -511,4 +511,222 @@ $(document).ready(function() {
             }, 500);
         }
     });
+
+    // URL Scanner form submission
+    $("#urlScanForm").submit(function(e) {
+        e.preventDefault();
+        
+        const url = $("#urlToScan").val().trim();
+        if (!url) {
+            showMessage("#urlScanResult", "error", "Please enter a URL to scan");
+            return;
+        }
+        
+        // Show loading state
+        const btn = $(this).find('button[type="submit"]');
+        const originalBtnText = btn.html();
+        btn.html('<div class="loading"><div></div><div></div><div></div></div> Scanning...');
+        btn.prop('disabled', true);
+        
+        // Send scan request
+        $.ajax({
+            url: '/api/scan-url',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ url: url }),
+            success: function(response) {
+                btn.html(originalBtnText);
+                btn.prop('disabled', false);
+                
+                if (response.status === 'success') {
+                    // Show initial success message
+                    let resultContent = `
+                        <div class="alert alert-info animate-fade-in">
+                            <h4 class="alert-heading"><i class="bi bi-check-circle"></i> URL Submitted for Scanning</h4>
+                            <p>Your URL has been submitted to VirusTotal for analysis.</p>
+                            <hr>
+                            <p><strong>Analysis ID:</strong> <code>${response.analysis_id}</code></p>
+                            <p class="mb-0">Please wait while we retrieve the scan results...</p>
+                        </div>
+                    `;
+                    showMessage("#urlScanResult", "custom", resultContent);
+                    
+                    // Poll for analysis results
+                    pollAnalysisResults(response.analysis_id, url);
+                } else {
+                    showMessage("#urlScanResult", "error", response.message || "Failed to scan URL");
+                }
+            },
+            error: function(xhr) {
+                btn.html(originalBtnText);
+                btn.prop('disabled', false);
+                
+                let errorMsg = "An error occurred while scanning the URL";
+                try {
+                    const response = JSON.parse(xhr.responseText);
+                    errorMsg = response.message || errorMsg;
+                } catch (e) {}
+                
+                showMessage("#urlScanResult", "error", errorMsg);
+            }
+        });
+    });
+    
+    // Function to poll for analysis results
+    function pollAnalysisResults(analysisId, url, attempts = 0) {
+        const maxAttempts = 30; // Maximum polling attempts (increased from 10)
+        const pollInterval = 5000; // 5 seconds between polls (increased from 3)
+        
+        if (attempts >= maxAttempts) {
+            showMessage("#urlScanResult", "error", "Timeout waiting for scan results. The scan may still be in progress. Please try again in a few minutes or check the analysis ID manually.");
+            return;
+        }
+        
+        // Update status message to show progress
+        if (attempts > 0) {
+            const progressMsg = `
+                <div class="alert alert-info animate-fade-in">
+                    <h4 class="alert-heading"><i class="bi bi-hourglass-split"></i> Scan in Progress</h4>
+                    <p>Waiting for VirusTotal to complete the scan... (Attempt ${attempts}/${maxAttempts})</p>
+                    <p><strong>Analysis ID:</strong> <code>${analysisId}</code></p>
+                    <p class="mb-0"><small>This may take up to 2-3 minutes. Please wait...</small></p>
+                </div>
+            `;
+            $("#urlScanResult").html(progressMsg);
+        }
+        
+        setTimeout(function() {
+            $.ajax({
+                url: `/api/url-analysis/${analysisId}`,
+                type: 'GET',
+                success: function(response) {
+                    if (response.status === 'success') {
+                        const status = response.status_analysis;
+                        
+                        // Check if scan is completed
+                        if (status === 'completed') {
+                            // Display results
+                            displayScanResults(response, url);
+                        } else if (status === 'queued' || status === 'in-progress' || status === 'in_progress') {
+                            // Still processing, poll again
+                            pollAnalysisResults(analysisId, url, attempts + 1);
+                        } else {
+                            // Unknown status, but might have stats anyway
+                            if (response.total_scans > 0) {
+                                displayScanResults(response, url);
+                            } else {
+                                // Continue polling if no stats yet
+                                pollAnalysisResults(analysisId, url, attempts + 1);
+                            }
+                        }
+                    } else {
+                        showMessage("#urlScanResult", "error", response.message || "Failed to retrieve scan results");
+                    }
+                },
+                error: function(xhr) {
+                    // If 404 or other error, might still be processing
+                    if ((xhr.status === 404 || xhr.status === 429) && attempts < maxAttempts) {
+                        pollAnalysisResults(analysisId, url, attempts + 1);
+                    } else {
+                        let errorMsg = "Failed to retrieve scan results";
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            errorMsg = response.message || errorMsg;
+                        } catch (e) {}
+                        showMessage("#urlScanResult", "error", errorMsg);
+                    }
+                }
+            });
+        }, pollInterval);
+    }
+    
+    // Function to display scan results
+    function displayScanResults(data, url) {
+        const totalScans = data.total_scans || 0;
+        const malicious = data.malicious || 0;
+        const suspicious = data.suspicious || 0;
+        const harmless = data.harmless || 0;
+        const undetected = data.undetected || 0;
+        
+        // Determine threat level
+        let threatLevel = "safe";
+        let alertClass = "alert-success";
+        let threatIcon = "bi-shield-check";
+        let threatText = "Safe";
+        
+        if (malicious > 0) {
+            threatLevel = "malicious";
+            alertClass = "alert-danger";
+            threatIcon = "bi-shield-x";
+            threatText = "Malicious";
+        } else if (suspicious > 0) {
+            threatLevel = "suspicious";
+            alertClass = "alert-warning";
+            threatIcon = "bi-shield-exclamation";
+            threatText = "Suspicious";
+        }
+        
+        let resultContent = `
+            <div class="alert ${alertClass} animate-fade-in">
+                <h4 class="alert-heading">
+                    <i class="bi ${threatIcon}"></i> Scan Results: ${threatText}
+                </h4>
+                <p><strong>URL:</strong> <code>${url}</code></p>
+                <hr>
+                <div class="scan-stats">
+                    <h5><i class="bi bi-bar-chart"></i> Scan Statistics</h5>
+                    <div class="row mt-3">
+                        <div class="col-md-6">
+                            <div class="stat-item ${malicious > 0 ? 'text-danger' : ''}">
+                                <i class="bi bi-x-circle"></i> <strong>Malicious:</strong> ${malicious}
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stat-item ${suspicious > 0 ? 'text-warning' : ''}">
+                                <i class="bi bi-exclamation-triangle"></i> <strong>Suspicious:</strong> ${suspicious}
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stat-item text-success">
+                                <i class="bi bi-check-circle"></i> <strong>Harmless:</strong> ${harmless}
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="stat-item text-muted">
+                                <i class="bi bi-question-circle"></i> <strong>Undetected:</strong> ${undetected}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <p><strong>Total Scans:</strong> ${totalScans}</p>
+                        ${data.scan_date ? `<p><strong>Scan Date:</strong> ${new Date(data.scan_date * 1000).toLocaleString()}</p>` : ''}
+                    </div>
+                </div>
+                ${malicious > 0 || suspicious > 0 ? `
+                    <div class="mt-3">
+                        <div class="alert alert-warning">
+                            <strong><i class="bi bi-exclamation-triangle"></i> Warning:</strong> 
+                            This URL has been flagged by ${malicious + suspicious} security engine(s). 
+                            Exercise caution when visiting this URL.
+                        </div>
+                    </div>
+                ` : ''}
+                ${harmless > 0 && malicious === 0 && suspicious === 0 ? `
+                    <div class="mt-3">
+                        <div class="alert alert-success">
+                            <strong><i class="bi bi-check-circle"></i> Safe:</strong> 
+                            This URL appears to be safe based on VirusTotal's analysis.
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        `;
+        
+        showMessage("#urlScanResult", "custom", resultContent);
+        
+        // Scroll to results
+        $('html, body').animate({
+            scrollTop: $("#urlScanResult").offset().top - 100
+        }, 500);
+    }
 }); 

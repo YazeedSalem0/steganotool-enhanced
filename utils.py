@@ -18,6 +18,11 @@ import zipfile
 import shutil
 import zlib  # Add zlib for compression
 import qrcode  # Import qrcode library
+import requests  # For VirusTotal API
+from dotenv import load_dotenv  # For loading environment variables
+
+# Load environment variables
+load_dotenv()
 
 def derive_key(password, salt=None):
     """Derive a 32-byte key from a password using SHA-256"""
@@ -1016,3 +1021,198 @@ def extract_message_from_qr(qr_code_path, password=None):
     except Exception as e:
         print(f"Error extracting message from QR code: {str(e)}")
         return f"Error: {str(e)}"
+
+# VirusTotal API integration functions
+def get_virustotal_api_key():
+    """Get VirusTotal API key from environment variable or return default"""
+    api_key = os.getenv('VIRUSTOTAL_API_KEY')
+    if not api_key:
+        # Fallback to default key if not set in environment
+        api_key = "b4647af0f875eda6e21930239145a4de784b043b4a162309d2f718f5a808e65b"
+    return api_key
+
+def scan_url_with_virustotal(url):
+    """
+    Scan a URL using VirusTotal API
+    
+    Args:
+        url: The URL to scan
+        
+    Returns:
+        dict: Response containing analysis_id and status
+    """
+    try:
+        api_key = get_virustotal_api_key()
+        api_url = "https://www.virustotal.com/api/v3/urls"
+        
+        headers = {
+            "x-apikey": api_key,
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
+        # URL encode the URL
+        data = {"url": url}
+        
+        response = requests.post(api_url, headers=headers, data=data, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            return {
+                "status": "success",
+                "analysis_id": result.get("data", {}).get("id"),
+                "type": result.get("data", {}).get("type"),
+                "message": "URL submitted successfully for scanning"
+            }
+        else:
+            error_data = response.json() if response.text else {}
+            error_message = error_data.get("error", {}).get("message", f"HTTP {response.status_code}")
+            return {
+                "status": "error",
+                "message": f"VirusTotal API error: {error_message}",
+                "status_code": response.status_code
+            }
+            
+    except requests.exceptions.Timeout:
+        return {
+            "status": "error",
+            "message": "Request to VirusTotal API timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "status": "error",
+            "message": f"Network error: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }
+
+def get_url_analysis(analysis_id):
+    """
+    Get the analysis results for a URL scan
+    
+    Args:
+        analysis_id: The analysis ID returned from scan_url_with_virustotal
+        
+    Returns:
+        dict: Analysis results including scan statistics
+    """
+    try:
+        api_key = get_virustotal_api_key()
+        api_url = f"https://www.virustotal.com/api/v3/analyses/{analysis_id}"
+        
+        headers = {
+            "x-apikey": api_key
+        }
+        
+        response = requests.get(api_url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            data = result.get("data", {})
+            attributes = data.get("attributes", {})
+            stats = attributes.get("stats", {})
+            
+            return {
+                "status": "success",
+                "analysis_id": analysis_id,
+                "status_analysis": attributes.get("status"),
+                "harmless": stats.get("harmless", 0),
+                "malicious": stats.get("malicious", 0),
+                "suspicious": stats.get("suspicious", 0),
+                "undetected": stats.get("undetected", 0),
+                "timeout": stats.get("timeout", 0),
+                "total_scans": sum(stats.values()) if stats else 0,
+                "results": attributes.get("results", {}),
+                "scan_date": attributes.get("date")
+            }
+        else:
+            error_data = response.json() if response.text else {}
+            error_message = error_data.get("error", {}).get("message", f"HTTP {response.status_code}")
+            return {
+                "status": "error",
+                "message": f"VirusTotal API error: {error_message}",
+                "status_code": response.status_code
+            }
+            
+    except requests.exceptions.Timeout:
+        return {
+            "status": "error",
+            "message": "Request to VirusTotal API timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "status": "error",
+            "message": f"Network error: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }
+
+def get_url_report(url_hash):
+    """
+    Get a URL report by hash (SHA-256, SHA-1, or MD5)
+    
+    Args:
+        url_hash: The hash of the URL (SHA-256, SHA-1, or MD5)
+        
+    Returns:
+        dict: URL report with scan results
+    """
+    try:
+        api_key = get_virustotal_api_key()
+        api_url = f"https://www.virustotal.com/api/v3/urls/{url_hash}"
+        
+        headers = {
+            "x-apikey": api_key
+        }
+        
+        response = requests.get(api_url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            data = result.get("data", {})
+            attributes = data.get("attributes", {})
+            last_analysis_stats = attributes.get("last_analysis_stats", {})
+            last_analysis_results = attributes.get("last_analysis_results", {})
+            
+            return {
+                "status": "success",
+                "url": attributes.get("url"),
+                "harmless": last_analysis_stats.get("harmless", 0),
+                "malicious": last_analysis_stats.get("malicious", 0),
+                "suspicious": last_analysis_stats.get("suspicious", 0),
+                "undetected": last_analysis_stats.get("undetected", 0),
+                "timeout": last_analysis_stats.get("timeout", 0),
+                "total_scans": sum(last_analysis_stats.values()) if last_analysis_stats else 0,
+                "results": last_analysis_results,
+                "scan_date": attributes.get("last_analysis_date"),
+                "reputation": attributes.get("reputation", 0)
+            }
+        else:
+            error_data = response.json() if response.text else {}
+            error_message = error_data.get("error", {}).get("message", f"HTTP {response.status_code}")
+            return {
+                "status": "error",
+                "message": f"VirusTotal API error: {error_message}",
+                "status_code": response.status_code
+            }
+            
+    except requests.exceptions.Timeout:
+        return {
+            "status": "error",
+            "message": "Request to VirusTotal API timed out"
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            "status": "error",
+            "message": f"Network error: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }
