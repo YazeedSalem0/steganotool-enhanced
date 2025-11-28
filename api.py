@@ -287,11 +287,47 @@ def decrypt():
         
         # Extract data based on media type
         if media_type == 'image':
+            # Check if file is JPEG - need to convert to PNG for extraction
+            file_extension = Path(filename).suffix.lower()
+            if file_extension in ['.jpg', '.jpeg']:
+                print(f"WARNING: JPEG file detected. Converting to PNG for extraction: {filename}")
+                try:
+                    # Convert JPEG to PNG temporarily for extraction
+                    img = Image.open(file_path)
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    temp_png_path = os.path.splitext(file_path)[0] + "_temp_extract.png"
+                    img.save(temp_png_path, format="PNG")
+                    extract_path = temp_png_path
+                except Exception as e:
+                    print(f"Error converting JPEG to PNG: {str(e)}")
+                    return jsonify({
+                        'status': 'error', 
+                        'message': f'Failed to process JPEG file: {str(e)}. Please ensure you are using the PNG output file from encryption.'
+                    }), 400
+            else:
+                extract_path = file_path
+            
             # Extract data from image
             if hasattr(utils, 'extract_data_from_image'):
-                extracted_data = utils.extract_data_from_image(file_path)
+                try:
+                    extracted_data = utils.extract_data_from_image(extract_path)
+                except Exception as e:
+                    print(f"Error extracting data from image: {str(e)}")
+                    return jsonify({
+                        'status': 'error', 
+                        'message': f'Failed to extract data from image: {str(e)}. Make sure you are using the steganographic output file (stego_*.png), not the original file.'
+                    }), 400
             else:
                 return jsonify({'status': 'error', 'message': 'Image steganography not supported in this build'}), 400
+            
+            # Clean up temporary PNG file if created
+            if file_extension in ['.jpg', '.jpeg']:
+                try:
+                    if os.path.exists(temp_png_path):
+                        os.remove(temp_png_path)
+                except:
+                    pass
             
         elif media_type == 'audio':
             # Convert to WAV if needed
@@ -316,25 +352,61 @@ def decrypt():
         # Debug info
         print(f"DEBUG: Extracted data length: {len(extracted_data)} bytes")
         if len(extracted_data) > 0:
-            print(f"DEBUG: First few bytes: {' '.join([f'{b:02x}' for b in extracted_data[:16]])}")
+            print(f"DEBUG: First 16 bytes (hex): {' '.join([f'{b:02x}' for b in extracted_data[:16]])}")
+            print(f"DEBUG: Last 32 bytes (hex): {' '.join([f'{b:02x}' for b in extracted_data[-32:]])}")
+            # Count occurrences of 0x01 marker
+            marker_count = extracted_data.count(0x01)
+            print(f"DEBUG: Found {marker_count} occurrences of 0x01 marker byte")
         
         # Look for embedded password (marker byte 0x01 indicates password follows)
+        # Format: [encrypted_data][0x01][password_bytes]
+        # Search from the END backwards to find the LAST 0x01 marker (the actual separator)
         embedded_password = None
         password_found = False
         encrypted_data = extracted_data
         
-        # Search for the marker byte
-        for i in range(len(extracted_data) - 1):
+        # Search backwards from the end for the marker byte
+        # This ensures we find the actual separator, not a 0x01 byte in the encrypted data
+        marker_found = False
+        for i in range(len(extracted_data) - 1, 0, -1):  # Search backwards
             if extracted_data[i] == 0x01:  # Found marker
-                encrypted_data = extracted_data[:i]
-                try:
-                    embedded_password = extracted_data[i+1:].decode('utf-8')
-                    password_found = True
-                    print(f"Found embedded password: {embedded_password}")
-                    print(f"DEBUG: Encrypted data length: {len(encrypted_data)} bytes")
-                    break
-                except UnicodeDecodeError:
-                    print("Failed to decode embedded password - possible corruption")
+                # Try to decode everything after the marker as password
+                password_candidate = extracted_data[i+1:]
+                if len(password_candidate) > 0:
+                    try:
+                        # Try to decode as UTF-8 password
+                        embedded_password = password_candidate.decode('utf-8')
+                        # Validate it looks like a password (reasonable length, printable chars)
+                        if 4 <= len(embedded_password) <= 128 and all(32 <= ord(c) <= 126 for c in embedded_password):
+                            encrypted_data = extracted_data[:i]
+                            password_found = True
+                            print(f"Found embedded password: {embedded_password}")
+                            print(f"DEBUG: Encrypted data length: {len(encrypted_data)} bytes")
+                            print(f"DEBUG: Password length: {len(embedded_password)} bytes")
+                            marker_found = True
+                            break
+                    except UnicodeDecodeError:
+                        # Not valid UTF-8, continue searching backwards
+                        continue
+        
+        # If we didn't find a valid password marker, try searching from beginning as fallback
+        # (for backwards compatibility with old format)
+        if not marker_found:
+            for i in range(len(extracted_data) - 1):
+                if extracted_data[i] == 0x01:  # Found marker
+                    try:
+                        password_candidate = extracted_data[i+1:]
+                        if len(password_candidate) > 0:
+                            embedded_password = password_candidate.decode('utf-8')
+                            if 4 <= len(embedded_password) <= 128:
+                                encrypted_data = extracted_data[:i]
+                                password_found = True
+                                print(f"Found embedded password (fallback): {embedded_password}")
+                                print(f"DEBUG: Encrypted data length: {len(encrypted_data)} bytes")
+                                break
+                    except UnicodeDecodeError:
+                        print("Failed to decode embedded password - possible corruption")
+                        continue
         
         # Always use embedded password if available
         if password_found:
@@ -665,6 +737,90 @@ def sign_in():
 def sign_up():
     """Render the sign-up page"""
     return render_template('sign-up.html')
+
+# VirusTotal API endpoints
+@app.route('/api/scan-url', methods=['POST'])
+def scan_url():
+    """Scan a URL using VirusTotal API"""
+    try:
+        data = request.get_json()
+        if not data or 'url' not in data:
+            return jsonify({'status': 'error', 'message': 'URL is required'}), 400
+        
+        url = data.get('url', '').strip()
+        if not url:
+            return jsonify({'status': 'error', 'message': 'URL cannot be empty'}), 400
+        
+        # Basic URL validation
+        if not (url.startswith('http://') or url.startswith('https://')):
+            return jsonify({'status': 'error', 'message': 'URL must start with http:// or https://'}), 400
+        
+        # Scan the URL
+        result = utils.scan_url_with_virustotal(url)
+        
+        if result['status'] == 'success':
+            return jsonify({
+                'status': 'success',
+                'analysis_id': result.get('analysis_id'),
+                'message': result.get('message', 'URL submitted for scanning'),
+                'url': url
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': result.get('message', 'Failed to scan URL')
+            }), 500
+            
+    except Exception as e:
+        print(f"Error in scan_url endpoint: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/url-analysis/<analysis_id>', methods=['GET'])
+def get_url_analysis(analysis_id):
+    """Get analysis results for a URL scan"""
+    try:
+        if not analysis_id:
+            return jsonify({'status': 'error', 'message': 'Analysis ID is required'}), 400
+        
+        result = utils.get_url_analysis(analysis_id)
+        
+        if result['status'] == 'success':
+            return jsonify(result), 200
+        else:
+            status_code = result.get('status_code', 500)
+            return jsonify({
+                'status': 'error',
+                'message': result.get('message', 'Failed to get analysis results')
+            }), status_code
+            
+    except Exception as e:
+        print(f"Error in get_url_analysis endpoint: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/url-report/<url_hash>', methods=['GET'])
+def get_url_report(url_hash):
+    """Get URL report by hash (SHA-256, SHA-1, or MD5)"""
+    try:
+        if not url_hash:
+            return jsonify({'status': 'error', 'message': 'URL hash is required'}), 400
+        
+        result = utils.get_url_report(url_hash)
+        
+        if result['status'] == 'success':
+            return jsonify(result), 200
+        else:
+            status_code = result.get('status_code', 500)
+            return jsonify({
+                'status': 'error',
+                'message': result.get('message', 'Failed to get URL report')
+            }), status_code
+            
+    except Exception as e:
+        print(f"Error in get_url_report endpoint: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True) 
